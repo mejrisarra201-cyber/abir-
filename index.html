@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Abir Hmam · AR</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Cormorant+Garamond:wght@300;400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; color: #F4E9DF; font-family: "Cormorant Garamond", serif; }
+  #ar { position: fixed; inset: 0; }
+  #cap { position: fixed; left: 0; right: 0; bottom: 8vh; text-align: center; pointer-events: none; opacity: 0; transition: opacity .6s ease; padding: 0 24px; z-index: 3; }
+  #cap .ar { font-family: "Amiri", serif; font-size: clamp(20px, 5.6vw, 30px); line-height: 1.7; direction: rtl; text-shadow: 0 1px 8px rgba(8,43,39,.9); }
+  #cap .en { font-size: clamp(14px, 3.8vw, 18px); letter-spacing: .04em; color: #A3A68B; margin-top: 4px; text-shadow: 0 1px 8px rgba(8,43,39,.9); }
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #082B27; z-index: 5; padding: 24px; text-align: center; }
+  #start button { background: transparent; border: 1px solid #B99A69; color: #F4E9DF; font-family: "Amiri", serif; font-size: 22px; padding: 14px 34px; border-radius: 40px; cursor: pointer; }
+  #start p { margin: 0; font-size: 15px; color: #A3A68B; line-height: 1.6; }
+  #hint { position: fixed; top: 6vh; left: 0; right: 0; text-align: center; font-family: "Amiri", serif; font-size: 20px; color: #F4E9DF; pointer-events: none; z-index: 3; text-shadow: 0 1px 8px rgba(8,43,39,.9); transition: opacity .5s ease; }
+  #hint small { display: block; font-family: "Cormorant Garamond", serif; font-size: 14px; color: #A3A68B; margin-top: 4px; }
+  #replay { position: fixed; bottom: 3vh; left: 50%; transform: translateX(-50%); background: none; border: none; color: #B99A69; font-family: "Amiri", serif; font-size: 18px; cursor: pointer; opacity: 0; transition: opacity .8s ease; pointer-events: none; z-index: 4; }
+  #replay.show { opacity: 1; pointer-events: auto; }
+</style>
+</head>
+<body>
+<div id="ar"></div>
+<div id="hint"><span class="ar-text">وجّه الكاميرا نحو الدائرة</span><small>Point the camera at the circle</small></div>
+<div id="cap"><div class="ar"></div><div class="en"></div></div>
+<div id="start">
+  <button id="begin" type="button">ابدأ التجربة</button>
+  <p>Allow camera access. Turn your sound on.<br>اسمح بالكاميرا، وشغّل الصوت.</p>
+</div>
+<button id="replay" type="button">إعادة · Replay</button>
+
+<script>
+(function () {
+  // ---------- Canvas that is shown on the tracked target ----------
+  // The target (the circle on the screen) is 1 unit wide. The plane is 2.2 units,
+  // so the circle in the canvas has radius RR (≈ half of the target).
+  var S = 1024, CX = 512, CY = 512, RR = 233;
+  var canvas2d = document.createElement('canvas');
+  canvas2d.width = S; canvas2d.height = S;
+  var g = canvas2d.getContext('2d');
+
+  var N = 1400;
+  var P = new Float32Array(N * 2);
+  var TA = new Float32Array(N * 2); // shape (3, 8): her frequency
+  var TB = new Float32Array(N * 2); // shape (2, 5): another frequency
+  var pAlpha = 0;
+  var logo = new Image();
+  logo.src = 'logo.png';
+
+  function clamp(x) { return Math.max(0, Math.min(1, x)); }
+  function easeOut(x) { return 1 - Math.pow(1 - clamp(x), 3); }
+
+  // ---------- Particles (sand) ----------
+  function chladni(n, m, x, y) {
+    var u = (x + 1) * Math.PI / 2, v = (y + 1) * Math.PI / 2;
+    return Math.cos(n * u) * Math.cos(m * v) - Math.cos(m * u) * Math.cos(n * v);
+  }
+  function fillTargets(arr, n, m) {
+    var k = 0, guard = 0;
+    while (k < N && guard < 3000000) {
+      guard++;
+      var x = Math.random() * 2 - 1, y = Math.random() * 2 - 1;
+      if (x * x + y * y > 0.96) continue;
+      var f = chladni(n, m, x, y);
+      var p = Math.exp(-(f * f) / (2 * 0.07 * 0.07));
+      if (Math.random() < p) { arr[2 * k] = x; arr[2 * k + 1] = y; k++; }
+    }
+  }
+  function initParticles() {
+    for (var i = 0; i < N; i++) {
+      var r = Math.sqrt(Math.random()) * 0.95, a = Math.random() * Math.PI * 2;
+      P[2 * i] = r * Math.cos(a); P[2 * i + 1] = r * Math.sin(a);
+    }
+  }
+  function updateParticles(t, dt) {
+    pAlpha = t < 14 ? 0 : (t < 15.5 ? (t - 14) / 1.5 : (t < 31.5 ? 1 : clamp(1 - (t - 31.5) / 1.2)));
+    if (t < 14) return;
+    var k = 1 - Math.pow(0.02, dt);
+    for (var i = 0; i < N; i++) {
+      var ix = 2 * i, iy = ix + 1;
+      if (t < 22) {
+        var e = clamp((t - 14) / 6) * 0.012;
+        P[ix] += (Math.random() - 0.5) * e;
+        P[iy] += (Math.random() - 0.5) * e;
+        var rr = Math.hypot(P[ix], P[iy]);
+        if (rr > 0.95) { P[ix] *= 0.95 / rr; P[iy] *= 0.95 / rr; }
+        continue;
+      }
+      var tg = (t >= 25.5 && t < 28.5) ? TB : TA;
+      P[ix] += (tg[ix] - P[ix]) * k;
+      P[iy] += (tg[iy] - P[iy]) * k;
+    }
+  }
+  function drawParticles() {
+    if (pAlpha <= 0) return;
+    g.fillStyle = '#B99A69';
+    for (var i = 0; i < N; i++) {
+      var x = CX + P[2 * i] * RR * 1.02, y = CY + P[2 * i + 1] * RR * 1.02;
+      g.globalAlpha = 0.85 * pAlpha;
+      g.fillRect(x - 1.4, y - 1.4, 2.8, 2.8);
+    }
+    g.globalAlpha = 1;
+  }
+
+  // ---------- Scene 2: the circle ----------
+  function drawPlate(t) {
+    if (t < 3) return;
+    var p = easeOut((t - 3) / 4);
+    g.beginPath();
+    g.arc(CX, CY, RR * p, 0, Math.PI * 2);
+    g.fillStyle = 'rgba(163,166,139,0.08)';
+    g.fill();
+    g.lineWidth = 3;
+    g.strokeStyle = '#B99A69';
+    g.globalAlpha = 0.9 * p;
+    g.stroke();
+    g.globalAlpha = 1;
+  }
+
+  // ---------- Scene 3: name to numbers ----------
+  var ROW_A = [{ c: 'ع', v: '70' }, { c: 'ب', v: '2' }, { c: 'ي', v: '10' }, { c: 'ر', v: '200' }];
+  var ROW_B = [{ c: 'ح', v: '8' }, { c: 'م', v: '40' }, { c: 'ا', v: '1' }, { c: 'م', v: '40' }];
+  var XS = [0.82, 0.61, 0.39, 0.18];
+  var YA = 150, YB = 874;
+
+  function drawCell(x, y, letter, value, a, b) {
+    g.textAlign = 'center';
+    g.globalAlpha = a;
+    g.font = '64px "Amiri", serif';
+    g.fillStyle = '#F4E9DF';
+    g.fillText(letter, x, y);
+    g.globalAlpha = b;
+    g.font = '400 30px "Cormorant Garamond", serif';
+    g.fillStyle = '#B99A69';
+    g.fillText(value, x, y + 44);
+    g.globalAlpha = 1;
+  }
+
+  function drawNumbers(t) {
+    var fade = clamp(1 - (t - 21) / 1.2);
+    if (fade <= 0 || t < 7) return;
+    for (var i = 0; i < 4; i++) {
+      var x = S * XS[i];
+      drawCell(x, YA, ROW_A[i].c, ROW_A[i].v,
+        clamp((t - (7 + i * 0.35)) / 0.6) * fade,
+        clamp((t - (9 + i * 0.3)) / 0.6) * fade);
+      drawCell(x, YB, ROW_B[i].c, ROW_B[i].v,
+        clamp((t - (7.8 + i * 0.35)) / 0.6) * fade,
+        clamp((t - (9.8 + i * 0.3)) / 0.6) * fade);
+    }
+    var c = clamp((t - 11) / 0.8) * fade;
+    g.globalAlpha = c;
+    g.textAlign = 'center';
+    g.font = '400 36px "Cormorant Garamond", serif';
+    g.fillStyle = '#B99A69';
+    g.fillText('282 → 12 → 3', CX, YA + 96);
+    g.fillText('89 → 17 → 8', CX, YB + 96);
+    g.globalAlpha = 1;
+  }
+
+  // ---------- Scene 4: ripples ----------
+  function drawRipples(t) {
+    if (t < 14 || t > 24) return;
+    for (var k = 0; k < 8; k++) {
+      var age = t - (14 + k * 1.0);
+      if (age < 0 || age > 2.2) continue;
+      var p = age / 2.2;
+      g.beginPath();
+      g.arc(CX, CY, RR * (1 + p * 0.9), 0, Math.PI * 2);
+      g.strokeStyle = 'rgba(163,166,139,' + (0.45 * (1 - p)).toFixed(3) + ')';
+      g.lineWidth = 2;
+      g.stroke();
+    }
+  }
+
+  // ---------- Scene 6: the logo ----------
+  function drawLogo(t) {
+    if (t < 31.5) return;
+    var p = easeOut((t - 31.5) / 3.5);
+    var D = RR * 2.1 * (0.8 + 0.2 * p);
+    if (logo.complete && logo.naturalWidth) {
+      g.save();
+      g.globalAlpha = p;
+      g.beginPath();
+      g.arc(CX, CY, D / 2, 0, Math.PI * 2);
+      g.clip();
+      g.drawImage(logo, CX - D / 2, CY - D / 2, D, D);
+      g.restore();
+    }
+    var q = easeOut((t - 33.5) / 2.5);
+    g.globalAlpha = q;
+    g.textAlign = 'center';
+    var y = CY + RR * 1.25 + 70;
+    g.fillStyle = '#F4E9DF';
+    g.font = '400 60px "Cormorant Garamond", serif';
+    g.fillText('Abir Hmam', CX, y);
+    g.fillStyle = '#B99A69';
+    g.font = '40px "Amiri", serif';
+    g.fillText('عبير حمام', CX, y + 56);
+    g.globalAlpha = 1;
+  }
+
+  // ---------- Scene 7: the pattern repeats ----------
+  function drawTile(t) {
+    var a = 0.14 * easeOut((t - 38) / 2.5);
+    if (a <= 0 || !(logo.complete && logo.naturalWidth)) return;
+    var Sz = RR * 1.5;
+    for (var r = -1; r < 8; r++) {
+      for (var c = -1; c < 8; c++) {
+        var x = c * Sz + (r % 2 ? Sz / 2 : 0), y = r * Sz;
+        g.save();
+        g.globalAlpha = a;
+        g.beginPath();
+        g.arc(x + Sz / 2, y + Sz / 2, Sz * 0.5, 0, Math.PI * 2);
+        g.clip();
+        g.drawImage(logo, x, y, Sz, Sz);
+        g.restore();
+      }
+    }
+  }
+
+  function drawFrame(t) {
+    g.clearRect(0, 0, S, S);
+    drawTile(t);
+    drawPlate(t);
+    drawRipples(t);
+    drawNumbers(t);
+    drawParticles();
+    drawLogo(t);
+  }
+
+  // ---------- Captions ----------
+  var CAPTIONS = [
+    { s: 0,    e: 3.4,  ar: 'اسمك له تردد', en: 'Your name has a frequency.' },
+    { s: 7.5,  e: 14.2, ar: 'عبير = 3 · حمام = 8', en: 'Abir = 3 · Hmam = 8' },
+    { s: 14.5, e: 22.2, ar: 'اسمي يهتز بتردد', en: 'My name vibrates at a frequency.' },
+    { s: 22.5, e: 31,   ar: 'غيّر الاهتزاز، فيتشكّل الواقع', en: 'Change the vibration, and reality takes a new form.' },
+    { s: 31.5, e: 38.5, ar: 'هذا هو الشكل الذي يتخذه اسمي حين يهتز', en: 'This is the shape my name takes when it vibrates.' }
+  ];
+  var capEl = document.getElementById('cap');
+  var capAr = capEl.querySelector('.ar');
+  var capEn = capEl.querySelector('.en');
+  var lastCap = null;
+  function updateCaption(t) {
+    var c = null;
+    for (var i = 0; i < CAPTIONS.length; i++) {
+      if (t >= CAPTIONS[i].s && t < CAPTIONS[i].e) { c = CAPTIONS[i]; break; }
+    }
+    var key = c ? c.ar : '';
+    if (key === lastCap) return;
+    lastCap = key;
+    if (c) { capAr.textContent = c.ar; capEn.textContent = c.en; capEl.style.opacity = 1; }
+    else { capEl.style.opacity = 0; }
+  }
+
+  // ---------- Audio and haptics ----------
+  var ac = null, timers = [];
+  function unlockAudio() {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try { if (!ac) ac = new AC(); if (ac.state === 'suspended') ac.resume(); } catch (e) { ac = null; }
+  }
+  function scheduleAudio() {
+    if (!ac) return;
+    try {
+      var n = ac.currentTime;
+      var gn = ac.createGain();
+      gn.gain.setValueAtTime(0, n);
+      gn.connect(ac.destination);
+      var o = ac.createOscillator();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(110, n);
+      o.frequency.linearRampToValueAtTime(220, n + 22);
+      o.frequency.setValueAtTime(165, n + 31);
+      o.connect(gn);
+      o.start(n);
+      o.stop(n + 43);
+      var ev = [[0, 's', 0], [1.5, 'r', 0.16]];
+      for (var k = 0; k < 3; k++) { ev.push([14 + k, 's', 0.26]); ev.push([14 + k + 0.45, 's', 0.16]); }
+      for (var j = 0; j < 8; j++) { ev.push([17 + j * 0.5, 's', 0.26]); ev.push([17 + j * 0.5 + 0.22, 's', 0.16]); }
+      ev.push([31, 's', 0.16]); ev.push([38, 's', 0.16]); ev.push([41, 'r', 0]);
+      ev.forEach(function (e) {
+        if (e[1] === 's') gn.gain.setValueAtTime(e[2], n + e[0]);
+        else gn.gain.linearRampToValueAtTime(e[2], n + e[0]);
+      });
+    } catch (e) {}
+  }
+  function scheduleHaptics() {
+    function v(ms, pattern) {
+      timers.push(setTimeout(function () { if (navigator.vibrate) navigator.vibrate(pattern); }, ms));
+    }
+    v(14000, 60); v(15000, 60); v(16000, 60);
+    for (var k = 0; k < 8; k++) v((17 + k * 0.5) * 1000, 40);
+    v(38000, 120);
+  }
+
+  // ---------- Timeline ----------
+  var started = false, t0 = 0, ended = false;
+  function startExperience() {
+    timers.forEach(clearTimeout); timers = [];
+    scheduleAudio();
+    scheduleHaptics();
+    initParticles();
+    lastCap = null;
+    capEl.style.opacity = 0;
+    document.getElementById('replay').classList.remove('show');
+    ended = false;
+    t0 = performance.now();
+    started = true;
+  }
+
+  // ---------- MindAR setup ----------
+  var hint = document.getElementById('hint');
+  var mindarThree = null;
+  var texture = null;
+
+  async function init() {
+    var container = document.getElementById('ar');
+    mindarThree = new window.MINDAR.IMAGE.MindARThree({
+      container: container,
+      imageTargetSrc: 'targets.mind'
+    });
+    var THREE = window.THREE;
+    var renderer = mindarThree.renderer, scene = mindarThree.scene, camera = mindarThree.camera;
+
+    texture = new THREE.CanvasTexture(canvas2d);
+    var plane = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.2, 2.2),
+      new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false })
+    );
+    var anchor = mindarThree.addAnchor(0);
+    anchor.group.add(plane);
+    anchor.onTargetFound = function () {
+      hint.style.opacity = 0;
+      if (!started && !ended) startExperience();
+    };
+    anchor.onTargetLost = function () {
+      if (!ended) hint.style.opacity = 1;
+    };
+
+    await mindarThree.start();
+
+    renderer.setAnimationLoop(function () {
+      if (started) {
+        var t = (performance.now() - t0) / 1000;
+        updateParticles(t, 1 / 60);
+        drawFrame(t);
+        updateCaption(t);
+        texture.needsUpdate = true;
+        if (t >= 43 && !ended) {
+          ended = true;
+          document.getElementById('replay').classList.add('show');
+        }
+      }
+      renderer.render(scene, camera);
+    });
+  }
+
+  // ---------- Buttons ----------
+  document.getElementById('begin').addEventListener('click', function () {
+    this.disabled = true;
+    unlockAudio();
+    document.getElementById('start').style.display = 'none';
+    init().catch(function (err) {
+      document.getElementById('start').style.display = 'flex';
+      document.querySelector('#start p').textContent =
+        'Camera could not start. Check camera permission, then reload. / تعذّر تشغيل الكاميرا.';
+      document.getElementById('begin').disabled = false;
+      console.error(err);
+    });
+  });
+  document.getElementById('replay').addEventListener('click', function () {
+    unlockAudio();
+    startExperience();
+  });
+
+  // Precompute the two shapes and load fonts while the viewer reads the start screen
+  setTimeout(function () { fillTargets(TA, 3, 8); fillTargets(TB, 2, 5); }, 0);
+  if (document.fonts && document.fonts.load) {
+    document.fonts.load('64px "Amiri"');
+    document.fonts.load('400 30px "Cormorant Garamond"');
+  }
+})();
+</script>
+</body>
+</html>
